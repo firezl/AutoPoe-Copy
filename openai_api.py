@@ -1,12 +1,13 @@
 import asyncio
 import websockets as ws
-from json import dumps 
+from json import dumps
 from fastapi import FastAPI, WebSocket, HTTPException, Response, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from sse_starlette.sse import EventSourceResponse
 from pydantic import BaseModel, Field
 from typing import Dict, List, Optional, Union, Literal
 import time
+
 
 class ModelCard(BaseModel):
     id: str
@@ -62,6 +63,7 @@ class EmbeddingResponse(BaseModel):
 
 # for ChatCompletionRequest
 
+
 class UsageInfo(BaseModel):
     prompt_tokens: int = 0
     total_tokens: int = 0
@@ -95,30 +97,32 @@ class ChatCompletionResponse(BaseModel):
     model: str
     id: str
     object: Literal["chat.completion", "chat.completion.chunk"]
-    choices: List[Union[ChatCompletionResponseChoice, ChatCompletionResponseStreamChoice]]
+    choices: List[
+        Union[ChatCompletionResponseChoice, ChatCompletionResponseStreamChoice]
+    ]
     created: Optional[int] = Field(default_factory=lambda: int(time.time()))
     usage: Optional[UsageInfo] = None
+
 
 EventSourceResponse.DEFAULT_PING_INTERVAL = 100
 
 app = FastAPI()
 llms = ModelList(
     data=[
-        ModelCard(id="GPT-3.5-Turbo"),
         ModelCard(id="Assistant"),
-        ModelCard(id="Code-Llama-70B-FW"),
+        ModelCard(id="Claude-instant"),
+        ModelCard(id="Claude-instant-100k"),
         ModelCard(id="Gemini-Pro"),
         ModelCard(id="Web-Search"),
-        ModelCard(id="Claude-instant"),
         ModelCard(id="ChatGPT"),
-        ModelCard(id="Llama-2-7b"),
-        ModelCard(id="Google-PaLM"),
-        ModelCard(id="Llama-2-13b"),
-        ModelCard(id="Claude-instant-100k"),
-        ModelCard(id="Mistral-Medium"),
-        ModelCard(id="Llama-2-70b-Groq"),
-        ModelCard(id="RekaFlash"),
-        ModelCard(id="Mixtral-8x7B-Chat"),
+        ModelCard(id="Claude-3-Sonnet"),
+        ModelCard(id="Claude-3-Sonnet-200k"),
+        ModelCard(id="Claude-3-Haiku"),
+        ModelCard(id="Claude-3-Haiku-200k"),
+        ModelCard(id="Claude-3-Opus"),
+        ModelCard(id="Claude-3-Opus-200k"),
+        ModelCard(id="GPT-4"),
+        ModelCard(id="GPT-3.5-Turbo"),
     ]
 )
 
@@ -133,17 +137,21 @@ app.add_middleware(
 server, text_queue = None, None
 websockets = set()
 
+
 async def startup_event():
     global server, text_queue
     text_queue = asyncio.Queue()
-    server = await ws.serve(handle, "localhost", 8765)
+    server = await ws.serve(handle, "localhost", 18765)
+
 
 async def shutdown_event():
     server.close()
     await server.wait_closed()
 
+
 app.add_event_handler("startup", startup_event)
 app.add_event_handler("shutdown", shutdown_event)
+
 
 async def handle(websocket, path):
     global websockets, text_queue
@@ -151,7 +159,7 @@ async def handle(websocket, path):
     try:
         async for message in websocket:
             if isinstance(message, bytes):
-                if message[0] == 0xff:
+                if message[0] == 0xFF:
                     pass
                 elif message[0] == 0x00:
                     text_queue.put_nowait(None)
@@ -163,24 +171,28 @@ async def handle(websocket, path):
     finally:
         websockets.remove(websocket)
 
+
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await handle(websocket, "/ws")
+
 
 @app.get("/health")
 async def health() -> Response:
     """Health check."""
     return Response(status_code=200)
 
+
 @app.get("/v1/models", response_model=ModelList)
 async def list_models():
     return llms
+
 
 @app.post("/v1/chat/completions", response_model=ChatCompletionResponse)
 async def create_chat_completion(request: ChatCompletionRequest):
     if websockets.__len__() == 0:
         raise HTTPException(status_code=500, detail="ws connection not established")
-    
+
     if len(request.messages) < 1 or request.messages[-1].role == "assistant":
         raise HTTPException(status_code=400, detail="Invalid request")
 
@@ -189,22 +201,29 @@ async def create_chat_completion(request: ChatCompletionRequest):
 
     for websocket in websockets:
         try:
-            await asyncio.wait_for(websocket.send(
-                '{ "model": "%s", "message": "%s" }' % (request.model, request.messages[-1].content)
-            ), timeout=10.0)
+            print(request.messages[-1].content)
+            await asyncio.wait_for(
+                websocket.send(
+                    '{ "model": "%s", "message": "%s" }'
+                    % (request.model, request.messages[-1].content)
+                ),
+                timeout=60,
+            )
         except asyncio.TimeoutError:
             raise HTTPException(status_code=500, detail="ws send timeout")
         break
 
     if request.stream:
+
         async def stream_gen():
             global text_queue
             while True:
-                try: text = await asyncio.wait_for(text_queue.get(), timeout=10.0)
+                try:
+                    text = await asyncio.wait_for(text_queue.get(), timeout=60)
                 except asyncio.TimeoutError:
                     raise HTTPException(status_code=500, detail="Poe did not respond")
 
-                if text is False: 
+                if text is False:
                     text_queue = asyncio.Queue()
                     raise HTTPException(status_code=500, detail="Poe not ready")
 
@@ -216,32 +235,31 @@ async def create_chat_completion(request: ChatCompletionRequest):
                 choice_data = ChatCompletionResponseStreamChoice(
                     index=0,
                     delta=message,
-                    finish_reason=None if text is not None else "stop"
+                    finish_reason=None if text is not None else "stop",
                 )
                 chunk = ChatCompletionResponse(
                     model=request.model,
                     id="",
                     choices=[choice_data],
                     created=int(time.time()),
-                    object="chat.completion.chunk"
+                    object="chat.completion.chunk",
                 )
                 yield "{}".format(chunk.model_dump_json(exclude_unset=True))
 
                 if text is None and text_queue.empty():
-                    yield '[DONE]'
+                    yield "[DONE]"
                     break
 
         return EventSourceResponse(stream_gen(), media_type="text/event-stream")
-    
+
     global text_queue
-    data = ''
+    data = ""
     while True:
-        try: text = await asyncio.wait_for(text_queue.get(), timeout=10.0)
+        try:
+            text = await asyncio.wait_for(text_queue.get(), timeout=60)
         except asyncio.TimeoutError:
             raise HTTPException(status_code=500, detail="Poe did not respond")
-        
-        print(text)
-        if text is False: 
+        if text is False:
             text_queue = asyncio.Queue()
             raise HTTPException(status_code=500, detail="Poe not ready")
         elif text is None and text_queue.empty():
@@ -262,12 +280,14 @@ async def create_chat_completion(request: ChatCompletionRequest):
 
     return ChatCompletionResponse(
         model=request.model,
-        id="", 
+        id="",
         choices=[choice_data],
         object="chat.completion",
-        usage=UsageInfo()
+        usage=UsageInfo(),
     )
+
 
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(app, host="0.0.0.0", port=8000, workers=1)
